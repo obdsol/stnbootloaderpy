@@ -290,6 +290,42 @@ class StnUpdater:
             if byte == b">":
                 return True
 
+class FirmwareImageType(IntEnum):
+    Normal = 0x00
+    TolerateErrors = 0x01
+    Validation = 0x10
+
+class FirmwareImageDescriptor:
+    def __init__(self, data):
+        self.image_type, _, self.next_idx, self.error_idx, self.image_offset, self.image_size = struct.unpack(">BBBBLL", data)
+
+class FirmwareImage:
+    def __init__(self, firmware):
+        self.firmware = firmware
+
+        magic, version, dev_id_len = struct.unpack("6s2sb", firmware[:9])
+        if not magic == b"STNFWv" or not version == b"05":
+            raise Exception("MAGIC OR VERSION")
+
+        self.dev_ids = struct.unpack(">{}H".format(dev_id_len), firmware[9:9 + (dev_id_len * 2)])
+        
+        desc_count = firmware[11]
+
+        self.descriptors = []
+
+        if desc_count > 0:
+            for i in range(desc_count):
+                start = 12 + (i * 12)
+                data = firmware[start:start+12]
+                self.descriptors.append(FirmwareImageDescriptor(data))
+        else:
+            image_type = 0x00
+            next_idx = 0xFF
+            error_idx = 0x00
+            image_offset = 12
+            image_size = len(firmware) - 12
+            self.descriptors.append(FirmwareImageDescriptor(struct.pack(">BBBBLL", image_type, 0, next_idx, error_idx, image_offset, image_size)))
+
 def batch(list, size):
     for i in range(0, len(list), size):
         yield list[i: i + size]
@@ -304,38 +340,61 @@ def upload_firmware(config):
 
     with open(config["firmware_path"], "rb") as binary:
         firmware = bytearray(binary.read())
-        
-    magic, version, dev_id_len = struct.unpack("6s2sb", firmware[:9])
-    if not magic == b"STNFWv" or not version == b"05":
-        raise Exception("MAGIC OR VERSION")
 
-    dev_ids = struct.unpack(">{}H".format(dev_id_len), firmware[9:9 + (dev_id_len * 2)])
+    firmware_image = FirmwareImage(firmware)
 
-    if dev_ids[0] != updater.device_id():
+    if not updater.device_id() in firmware_image.dev_ids:
         raise Exception("DEVICE ID")
 
-    image = firmware[12:]
-    if not updater.start_upload(len(image)):
-        raise Exception("START UPLOAD")
+    image_idx = 0
+    failed = False
 
-    chunks = enumerate(batch(image, config["chunk_size"]))
-    for idx, chunk in tqdm(chunks, total=math.ceil(len(image)/config["chunk_size"]), unit="chunk"):
-        chunk = list(chunk)
-        written = updater.send_chunk(idx, chunk)
+    while True:
+        descriptor = firmware_image.descriptors[image_idx]
+        firmware_data = firmware_image.firmware[descriptor.image_offset : descriptor.image_offset + descriptor.image_size]
 
-        if written != idx:
-            for _ in range(3):
-                written = updater.send_chunk(idx, chunk)
-                if written == idx:
-                    break
+        if not updater.start_upload(len(firmware_data)):
+            raise Exception("START UPLOAD")
+
+        failed = False
+
+        chunks = enumerate(batch(firmware_data, config["chunk_size"]))
+        for idx, chunk in tqdm(chunks, total=math.ceil(len(firmware_data)/config["chunk_size"]), unit="chunk"):
+            chunk = list(chunk)
+            written = updater.send_chunk(idx, chunk)
+
             if written != idx:
-                raise Exception("CHUNK FAILURE")
-    
-    if updater.status() == 1:
+                for _ in range(3):
+                    written = updater.send_chunk(idx, chunk)
+                    if written == idx:
+                        break
+                if written != idx:
+                    failed = True
+                    break
+
+        if descriptor.next_idx != 0xFF:
+            match descriptor.image_type:
+                case FirmwareImageType.Normal.value:
+                    image_idx = descriptor.next_idx
+                case FirmwareImageType.TolerateErrors.value:
+                    pass
+                case FirmwareImageType.Validation.value:
+                    if failed:
+                        image_idx = descriptor.error_idx
+                    else:
+                        image_idx = descriptor.next_idx
+                    failed = False
+        else:
+            break
+
+        if failed:
+            return
+            
+    if updater.status() != 1 or failed:
+        print("Upload Failed")
+    else:
         updater.reset()
         print("Upload Successful")
-    else:
-        print("Upload Failed")
 
     updater.port.close()
 
