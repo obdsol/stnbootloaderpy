@@ -388,7 +388,7 @@ def upload_firmware(config):
             break
 
         if failed:
-            return
+            break
             
     if updater.status() != 1 or failed:
         print("Upload Failed")
