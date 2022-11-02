@@ -120,8 +120,8 @@ class FrameReceiver:
     def is_nack(self):
         return self.ack == 2
 
-    def is_valid(self):
-        return self.is_done() and self.crc.final() == self.checksum and self.ack == 1
+    def is_valid(self, expected_cmd):
+        return self.is_done() and self.crc.final() == self.checksum and self.ack == 1 and self.command == expected_cmd
 
 class StnUpdater:
     def __init__(self, port):
@@ -179,13 +179,31 @@ class StnUpdater:
     def send_raw(self, data):
         self.port.write(str.encode(data))
 
-    def recv_response(self, timeout=0.05):
+    def recv_response(self, timeout=0.2, resend_retry=3):
         response = self.recv_frame(timeout)
+
+        if not response.is_done():
+            for _ in range(resend_retry):
+                self.send_command(0x01, None)
+                response = self.recv_frame(0.2)
+                if response.is_done():
+                    break
+
+        return response
+
+    def transmit(self, cmd, data, timeout=0.2):
+        for _ in range(5):
+            self.send_command(cmd, data)
+            response = self.recv_response(timeout)
+
+            if response.is_valid(cmd):
+                break
+
         return response
 
     def connect(self):
         self.send_command(0x03, None)
-        response = self.recv_response()
+        response = self.recv_response(resend_retry=0)
 
         if not response.is_done():
             self.send_raw("?\r")
@@ -199,45 +217,40 @@ class StnUpdater:
 
             for _ in range(0, 5):
                 self.send_command(0x03, None)
-                response = self.recv_response()
-                if (response.is_valid()):
+                response = self.recv_response(timeout=0.05, resend_retry=0)
+                if (response.is_valid(0x03)):
                     return True
 
-        return response.is_valid() 
+        return response.is_valid(0x03) 
 
     def device_id(self):
-        self.send_command(0x07, None)
-        response = self.recv_response()
+        response = self.transmit(0x07, None)
 
-        if not response.is_valid():
-            print("Device ID command timed out")
+        if not response.is_valid(0x07):
             return None
 
         return struct.unpack(">H", bytearray(response.buffer))[0]
 
     def version(self):
-        self.send_command(0x06, None)
-        response = self.recv_response()
+        response = self.transmit(0x06, None)
 
-        if not response.is_valid():
+        if not response.is_valid(0x06):
             return None
 
         return struct.unpack("BB", bytearray(response.buffer))
 
     def start_upload(self, image_size):
-        self.send_command(0x30, [((image_size >> 16) & 0xFF), ((image_size >> 8) & 0xFF), (image_size & 0xFF),  0x01])
-        response = self.recv_response()
+        response = self.transmit(0x30, [((image_size >> 16) & 0xFF), ((image_size >> 8) & 0xFF), (image_size & 0xFF),  0x01])
 
-        if not response.is_valid():
+        if not response.is_valid(0x30):
             return None
 
         return struct.unpack(">H", bytearray(response.buffer))[0]
 
     def status(self):
-        self.send_command(0x0F, None)
-        response = self.recv_response()
+        response = self.transmit(0x0F, None)
 
-        if not response.is_valid():
+        if not response.is_valid(0x0F):
             return None
 
         return struct.unpack("B", bytearray(response.buffer))[0]
@@ -247,16 +260,26 @@ class StnUpdater:
         zz.extend(data)
 
         for i in range(5):
-            self.send_command(0x31, zz)
-            response = self.recv_response(1)
+            response = self.transmit(0x31, zz, timeout=1)
 
-            if response.is_valid():
+            if response.is_valid(0x31):
                 break
+
+            elif response.is_nack() and response.buffer[0] == 0x01:
+                pass
+
+            else:
+                print("Failed chunk")
+                attrs = vars(response)
+                raise Exception(', '.join("%s: %s" % item for item in attrs.items()))
+
+
 
         return struct.unpack(">H", bytearray(response.buffer))[0]
 
     def reset(self):
         self.send_command(0x02, None)
+        self.recv_response()
 
     def wait_for_prompt(self, timeout=1):
         self.port.timeout = timeout
@@ -293,22 +316,28 @@ def upload_firmware(config):
 
     image = firmware[12:]
     if not updater.start_upload(len(image)):
-        raise BaseException
+        raise Exception("START UPLOAD")
 
     chunks = enumerate(batch(image, config["chunk_size"]))
     for idx, chunk in tqdm(chunks, total=math.ceil(len(image)/config["chunk_size"]), unit="chunk"):
         chunk = list(chunk)
         written = updater.send_chunk(idx, chunk)
+
         if written != idx:
-            raise Exception("CHUNK FAILURE")
+            for _ in range(3):
+                written = updater.send_chunk(idx, chunk)
+                if written == idx:
+                    break
+            if written != idx:
+                raise Exception("CHUNK FAILURE")
     
     if updater.status() == 1:
         updater.reset()
         print("Upload Successful")
-        time.sleep(1)
-        updater.recv_response()
     else:
         print("Upload Failed")
+
+    updater.port.close()
 
 config = {
     "firmware_path": "C:\\path\\to\\firmware.bin",
