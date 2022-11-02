@@ -295,7 +295,7 @@ def batch(list, size):
         yield list[i: i + size]
 
 def upload_firmware(config):
-    updater = StnUpdater(Serial(config["port"], baudrate=config["firmware_baudrate"]))
+    updater = StnUpdater(Serial(config["port"], baudrate=config["firmware_baudrate"], rtscts=config["flowcontrol"]))
 
     if not updater.connect():
         raise Exception("CONNECT")
@@ -344,6 +344,7 @@ config = {
     "port": "COM1",
     "firmware_baudrate": 9600,
     "updater_baudrate": 1000000,
+    "flowcontrol": False,
     "chunk_size": 1024
 }
 
