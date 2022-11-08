@@ -5,6 +5,7 @@ import time
 import math
 from tqdm import tqdm
 from enum import Enum, IntEnum, auto
+import binascii
 
 class ReceiverState(Enum):
     STX1 = auto()
@@ -15,26 +16,52 @@ class ReceiverState(Enum):
     CHECKSUM1 = auto()
     CHECKSUM2 = auto()
     ETX = auto()
-    SUCCESS = auto()
-    FAILED = auto()
+    COMPLETE = auto()
+    INCOMPLETE = auto()
 
 class FrameValue(IntEnum):
     STX = 0x55
     ETX = 0x04
     DLE = 0x05
 
+class ErrorValue(IntEnum):
+    CRC_MISMATCH = 0x01
+    PACKET_TOO_LONG = 0x02
+    UNKNOWN_COMMAND = 0x10
+    INVALID_FORMAT = 0x11
+    SEQUENCE = 0x30
+    AUTHENTICATION = 0x50
+    PROGRAMMING = 0x80
+    VERIFICATION = 0x90
+    FIRMWARE_VERSION = 0xA4
+
 class FrameReceiver:
     def __init__(self):
         self.curr_state = ReceiverState.STX1
         self.raw_buffer = bytearray()
         self.buffer = []
-        self.ack = 0x00
+        self.status = 0x00
         self.command = 0x00
         self.error = 0x00
         self.length = 0x00
         self.checksum = 0x00
         self.crc = CrcXmodem()
         self.dle = False
+
+    def __repr__(self):
+        print()
+        print(f"curr_state = {self.curr_state}")
+        print(f"raw_buffer = {binascii.hexlify(self.raw_buffer).upper()}")
+        print(f"status = 0b{self.status:02b}")
+        print(f"command = 0x{self.command:02X}")
+        print(f"error = {self.error.name}")
+        print(f"length = {self.length}")
+        print(f"checksum = 0x{self.checksum:04X}")
+        print(f"crc = {self.crc.check_result}")
+        print(f"dle = {self.dle}")
+
+    def __str__(self):
+        self.__repr__()
 
     def consume(self, byte):
         self.raw_buffer.append(byte[0])
@@ -52,20 +79,24 @@ class FrameReceiver:
             case ReceiverState.STX1:
                 if byte == FrameValue.STX:
                     self.curr_state = ReceiverState.STX2
+                else:
+                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.STX2:
                 if byte == FrameValue.STX:
                     self.curr_state = ReceiverState.COMMAND
                 else:
-                    self.curr_state = ReceiverState.COMMAND
+                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.COMMAND:
                 byte = byte_unstuff(byte)
                 if not byte == None:
                     self.crc.process([byte])
-                    self.ack = (byte & 0xC0) >> 6
+                    self.status = (byte & 0xC0) >> 6
                     self.command = byte & 0x3F
                     self.curr_state = ReceiverState.LENGTH
+                else:
+                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.LENGTH:
                 byte = byte_unstuff(byte)
@@ -76,6 +107,8 @@ class FrameReceiver:
                         self.curr_state = ReceiverState.DATA
                     else:
                         self.curr_state = ReceiverState.CHECKSUM1
+                else:
+                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.DATA:
                 byte = byte_unstuff(byte)
@@ -84,44 +117,50 @@ class FrameReceiver:
                     self.buffer.append(byte)
                     if len(self.buffer) >= self.length:
                         self.curr_state = ReceiverState.CHECKSUM1
+                else:
+                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.CHECKSUM1:
                 byte = byte_unstuff(byte)
                 if not byte == None:
                     self.checksum = byte << 8
                     self.curr_state = ReceiverState.CHECKSUM2
+                else:
+                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.CHECKSUM2:
                 byte = byte_unstuff(byte)
                 if not byte == None:
                     self.checksum |= byte
                     self.curr_state = ReceiverState.ETX
+                else:
+                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.ETX:
                 if byte == FrameValue.ETX:
                     if self.is_nack():
-                        self.error = struct.unpack("B", bytearray(self.buffer))[0]
-                    self.curr_state = ReceiverState.SUCCESS
+                        self.error = ErrorValue(struct.unpack("B", bytearray(self.buffer))[0])
+                    self.curr_state = ReceiverState.COMPLETE
                 else:
-                    self.curr_state = ReceiverState.FAILED
+                    self.curr_state = ReceiverState.INCOMPLETE
 
-            case ReceiverState.SUCCESS:
+            case ReceiverState.COMPLETE:
                 pass
 
-            case ReceiverState.FAILED:
+            case ReceiverState.INCOMPLETE:
                 pass
 
     def is_done(self):
-        return (self.curr_state == ReceiverState.SUCCESS) or (self.curr_state == ReceiverState.FAILED)
+        return (self.curr_state == ReceiverState.COMPLETE) or (self.curr_state == ReceiverState.INCOMPLETE)
 
     def is_ack(self):
-        return self.ack == 1
+        return self.status == 1
 
     def is_nack(self):
-        return self.ack == 2
+        return self.status == 2
 
     def is_valid(self, expected_cmd):
-        return self.is_done() and self.crc.final() == self.checksum and self.ack == 1 and self.command == expected_cmd
+        return self.is_done() and self.crc.final() == self.checksum and self.status == 1 and self.command == expected_cmd
 
 class StnUpdater:
     def __init__(self, port):
@@ -265,15 +304,14 @@ class StnUpdater:
             if response.is_valid(0x31):
                 break
 
-            elif response.is_nack() and response.buffer[0] == 0x01:
+            elif response.is_nack() and response.error == ErrorValue.CRC_MISMATCH:
                 pass
 
             else:
-                print("Failed chunk")
-                attrs = vars(response)
-                raise Exception(', '.join("%s: %s" % item for item in attrs.items()))
+                raise Exception(response)
 
-
+        if not response.is_valid(0x31):
+                raise Exception(response)
 
         return struct.unpack(">H", bytearray(response.buffer))[0]
 
