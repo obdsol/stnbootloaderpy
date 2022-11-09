@@ -79,14 +79,10 @@ class FrameReceiver:
             case ReceiverState.STX1:
                 if byte == FrameValue.STX:
                     self.curr_state = ReceiverState.STX2
-                else:
-                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.STX2:
                 if byte == FrameValue.STX:
                     self.curr_state = ReceiverState.COMMAND
-                else:
-                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.COMMAND:
                 byte = byte_unstuff(byte)
@@ -95,8 +91,6 @@ class FrameReceiver:
                     self.status = (byte & 0xC0) >> 6
                     self.command = byte & 0x3F
                     self.curr_state = ReceiverState.LENGTH
-                else:
-                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.LENGTH:
                 byte = byte_unstuff(byte)
@@ -107,8 +101,6 @@ class FrameReceiver:
                         self.curr_state = ReceiverState.DATA
                     else:
                         self.curr_state = ReceiverState.CHECKSUM1
-                else:
-                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.DATA:
                 byte = byte_unstuff(byte)
@@ -117,24 +109,18 @@ class FrameReceiver:
                     self.buffer.append(byte)
                     if len(self.buffer) >= self.length:
                         self.curr_state = ReceiverState.CHECKSUM1
-                else:
-                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.CHECKSUM1:
                 byte = byte_unstuff(byte)
                 if not byte == None:
                     self.checksum = byte << 8
                     self.curr_state = ReceiverState.CHECKSUM2
-                else:
-                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.CHECKSUM2:
                 byte = byte_unstuff(byte)
                 if not byte == None:
                     self.checksum |= byte
                     self.curr_state = ReceiverState.ETX
-                else:
-                    self.curr_state = ReceiverState.INCOMPLETE
 
             case ReceiverState.ETX:
                 if byte == FrameValue.ETX:
