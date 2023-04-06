@@ -6,6 +6,7 @@ import math
 from tqdm import tqdm
 from enum import Enum, IntEnum, auto
 import binascii
+import click
 
 class ReceiverState(Enum):
     STX1 = auto()
@@ -354,15 +355,22 @@ def batch(list, size):
     for i in range(0, len(list), size):
         yield list[i: i + size]
 
-def upload_firmware(config):
-    updater = StnUpdater(Serial(config["port"], baudrate=config["firmware_baudrate"], rtscts=config["flowcontrol"]))
+@click.command()
+@click.argument('firmware_path', required=True, type=click.Path(exists=True))
+@click.option('-s', '--serial-port', required=True, type=str, help='Serial port to use for communication.')
+@click.option('-u', '--updater-baudrate', required=True, type=int, help='Baudrate for updater.')
+@click.option('-f', '--firmware-baudrate', required=True, type=int, help='Baudrate for firmware.')
+@click.option('-r', '--flow-control', default=False, is_flag=True, help='Use hardware flow control.')
+@click.option('-c', '--chunk-size', default=1024, type=int, help='Chunk size for firmware upload.')
+def update_firmware(firmware_path, serial_port, updater_baudrate, firmware_baudrate, flow_control, chunk_size):
+    updater = StnUpdater(Serial(serial_port, baudrate=firmware_baudrate, rtscts=flow_control))
 
     if not updater.connect():
         raise Exception("CONNECT")
 
-    updater.port.baudrate = config["updater_baudrate"]
+    updater.port.baudrate = updater_baudrate
 
-    with open(config["firmware_path"], "rb") as binary:
+    with open(firmware_path, "rb") as binary:
         firmware = bytearray(binary.read())
 
     firmware_image = FirmwareImage(firmware)
@@ -382,8 +390,8 @@ def upload_firmware(config):
 
         failed = False
 
-        chunks = enumerate(batch(firmware_data, config["chunk_size"]))
-        for idx, chunk in tqdm(chunks, total=math.ceil(len(firmware_data)/config["chunk_size"]), unit="chunk"):
+        chunks = enumerate(batch(firmware_data, chunk_size))
+        for idx, chunk in tqdm(chunks, total=math.ceil(len(firmware_data)/chunk_size), unit="chunk"):
             chunk = list(chunk)
             written = updater.send_chunk(idx, chunk)
 
@@ -422,13 +430,5 @@ def upload_firmware(config):
 
     updater.port.close()
 
-config = {
-    "firmware_path": "C:\\path\\to\\firmware.bin",
-    "port": "COM1",
-    "firmware_baudrate": 9600,
-    "updater_baudrate": 1000000,
-    "flowcontrol": False,
-    "chunk_size": 1024
-}
-
-upload_firmware(config)
+if __name__ == '__main__':
+    update_firmware()
