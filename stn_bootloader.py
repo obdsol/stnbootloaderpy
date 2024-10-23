@@ -326,29 +326,34 @@ class FirmwareImageDescriptor:
 
 class FirmwareImage:
     def __init__(self, firmware):
+        index = 0
         self.firmware = firmware
 
-        magic, version, dev_id_len = struct.unpack("6s2sb", firmware[:9])
+        magic, version, dev_id_len = struct.unpack("6s2sb", firmware[index:index+9])
+        index += 9
+
         if not magic == b"STNFWv" or not version == b"05":
             raise Exception("MAGIC OR VERSION")
 
         self.dev_ids = struct.unpack(">{}H".format(dev_id_len), firmware[9:9 + (dev_id_len * 2)])
+        index += dev_id_len * 2
         
-        desc_count = firmware[11]
+        desc_count = firmware[index]
+        index += 1
 
         self.descriptors = []
 
         if desc_count > 0:
             for i in range(desc_count):
-                start = 12 + (i * 12)
+                start = index + (i * 12)
                 data = firmware[start:start+12]
                 self.descriptors.append(FirmwareImageDescriptor(data))
         else:
             image_type = 0x00
             next_idx = 0xFF
             error_idx = 0x00
-            image_offset = 12
-            image_size = len(firmware) - 12
+            image_offset = index
+            image_size = len(firmware) - index
             self.descriptors.append(FirmwareImageDescriptor(struct.pack(">BBBBLL", image_type, 0, next_idx, error_idx, image_offset, image_size)))
 
 def batch(list, size):
